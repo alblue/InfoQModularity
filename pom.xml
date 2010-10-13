@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<groupId>com.infoq</groupId>
+	<artifactId>modularity-parent</artifactId>
+	<version>1.0.0</version>
+	<name>Modularity Series for InfoQ</name>
+	<description>Examples for the InfoQ modularity series</description>
+	<url>http://github.com/alblue/InfoQModularity</url>
+	<organization>
+		<name>InfoQ</name>
+		<url>http://www.infoq.com/author/Alex-Blewitt</url>
+	</organization>
+	<scm>
+		<connection>http://github.com/alblue/InfoQModularity.git</connection>
+		<url>http://github.com/alblue/InfoQModularity</url>
+	</scm>
+	<properties>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+	</properties>
+	<packaging>pom</packaging>
+	<modules>
+		<module>com.infoq.minimal</module>
+		<module>com.infoq.templater</module>
+		<module>com.infoq.amazon</module>
+	</modules>
+	
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.osgi</groupId>
+				<artifactId>org.osgi.core</artifactId>
+				<version>4.2.0</version>
+				<scope>compile</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.ops4j</groupId>
+				<artifactId>maven-pax-plugin</artifactId>
+				<version>1.4</version>
+				<configuration>
+					<provision>
+						<param>--platform=felix</param>
+					</provision>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+</project>
