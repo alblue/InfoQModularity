@@ -1,7 +1,0 @@
-Manifest-Version: 1.0
-Export-Package: com.infoq.templater.api
-Bundle-Version: 1.0.0
-Created-By: 1.6.0_15 (Apple Inc.)
-Bundle-ManifestVersion: 2
-Bundle-SymbolicName: com.infoq.templater
-
