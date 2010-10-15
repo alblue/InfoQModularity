@@ -1,220 +1,233 @@
-<p><i>Note: This article was originally published on 24th October 2009 for InfoQ at <a href="http://www.infoq.com/articles/modular-java-static-modularity">http://www.infoq.com/articles/modular-java-static-modularity</a></i></p>
-<p>Modularity is an important aspect of large Java systems. Build scripts and projects are often split up into modules in order to improve the build, but this is rarely taken into account at runtime.</p>
-<p>In the second of the Modular Java series, we'll cover <i>static modularity</i>. We'll describe how to create bundles, how to install them into an OSGi engine and how to set up (versioned) dependencies between bundles. In the next episode, we'll look at <i>dynamic modularity</i> and show how bundles can react to other bundles coming and going.</p>
-<h1>Modular Java: Static modularity</h1>
-<p>As covered last time in <a href="http://www.infoq.com/articles/modular-java-what-is-it">Modular Java: What Is It?</a>, Java has always had packages as a unit of modularity at development time, and JARs as a unit of modularity at deployment time. However, although build tools like Maven guarantee a certain combination of packages and JARs at compile time, these dependencies may be inconsistent with the runtime classpath. To solve this problem, modules can declare their dependency requirements so that, at runtime, they can be checked prior to execution.</p>
-<p>OSGi is a runtime dynamic module system for Java. <a href="http://www.osgi.org/Specifications/HomePage">Specifications</a> describe the behaviour of how the OSGi runtime works; the current release is <a href="http://www.osgi.org/Download/Release4V42">OSGi R4.2</a> (as <a href="http://www.infoq.com/news/2009/09/osgi-4-2-released">covered by InfoQ</a> previously).
-<p>An OSGi module (also known as a <em>bundle</em>) is just a simple JAR file, with additional information in the archive's <code>MANIFEST.MF</code>. At a minimum, each bundle's manifest must contain:</p>
+<p>In the third of the Modular Java series, we'll cover <em>dynamic modularity</em>. We'll describe how a bundle's classes are resolved, how they can come and go, and how they can communicate with each other.</p>
+<p>The previous instalment, <a href="http://www.infoq.com/articles/modular-java-static-modularity">Modular Java: Static Modularity</a>, described how Java modules can be built and deployed as separate JARs. The example gave a client and server bundle (both in the same VM), and the client found the server via a factory method. In that example, the factory was instantiating a known class, but equally could have used reflection to obtain a service implementation; Spring uses this technique heavily to bind spring objects together.</p>
+<p>Before we cover dynamic services, it's worth taking a step back to consider class paths, since one of the differences between standard Java code and modular Java code is how dependencies are bound at runtime. Once we've covered that, we'll briefly touch on garbage collection of classes; so if are comfortable with that, you can <a href="#services">skip ahead</a>.</p>
+<h2>Bundle ClassPath</h2>
+<p>In a flat Java program, there is only one classpath &mdash; the one that the application was started with. This is usually specified on the command line, with <code>-classpath</code>, or via the <code>CLASSPATH</code> environment variable. The Java class loader then scans this path when trying to resolve classes at runtime, whether statically (compiled into the code) or dynamically (using reflection and <code>class.forName()</code>). However, it's possible to use multiple classloaders at runtime; web application engines like <a href="http://www.eclipse.org/jetty/">Jetty</a> and <a href="http://tomcat.apache.org/">Tomcat</a> frequently use this in order to support hot (re)deployment of applications.</p>
+<p>In OGSi, each bundle has its own class loader. Classes accessed from other bundles are <em>delegated</em> to the other bundle's class loader. So whilst in a traditional application, classes from a logging library, a client and server JAR may be loaded by the same class loader, in an OSGi module system, each would be loaded by their own.</p>
+<p>One corollary for this is that it's possible to have multiple class loaders in a VM which have different <code>Class</code> objects with the same name. A class called <code>com.infoq.example.App</code> could be exported both by version 1 and version 2 of bundle <code>com.infoq.example</code> in the same VM. Client bundles bound to version 1 would get the version 1 class, and clients bound to version 2 would get the version 2 class. This is a fairly common occurrence for modular systems; some code might need to load an older version of a library whilst newer code (in another bundle) might need a newer version of a library, inside the same VM. Fortunately, OSGi manages such transitive dependencies for you, and ensures that you never have problems due to incompatible classes.</p>
+<h2>Garbage collection of classes</h2>
+<p>Each class has a reference to the class loader that defined it. So if you were to access classes from a different bundle, you not only have the explicit reference to (the instance of) the class, but also its class loader. Whilst one bundle holds onto another's classes, it <em>pins</em> that bundle into memory. In the previous example, the client is pinned to the server.</p>
+<p>In a static world, it doesn't matter if you pin yourself to another class (or library); nothing comes and goes. However, in a dynamic world, it's possible for libraries or utilities to be replaced at runtime with newer versions. This might sound complex, but in fact it's been happening since the early days of web application engines like Tomcat (first released in 1999) with hot deployment of web applications. Each web application binds to the version of the Servlet API, and when it's stopped, the class loader that loaded the web application is dropped. When the web application is redeployed, a new class loader is created, and new versions of the classes are loaded in. As long as the servlet engine doesn't attempt to hold on to references from the old application, then the classes become garbage collected just like any other Java object.</p>
+<p>Not all libraries are aware of the possibilities of class leaks, which like memory leaks, are possible to code in Java. An obvious example is Log4J's <a href="http://logging.apache.org/log4j/1.2/apidocs/org/apache/log4j/Category.html#addAppender(org.apache.log4j.Appender)"><code>addAppender()</code></a> call, which once executed, will bind your classes to the lifetime of Log4J's bundle. Even if your bundle is stopped, Log4J will maintain the references to the appender and continue to send logging events (unless the bundle calls the appropriate <a href="http://logging.apache.org/log4j/1.2/apidocs/org/apache/log4j/Category.html#removeAppender(java.lang.String)"><code>removeAppender()</code></a> method when it stops).</p>
+<a name="services"><h2>Finding and binding</h2></a>
+<p>In order to be dynamic, we need to have a mechanism by which we can lookup services, but not permanently hold onto them (in case the bundle goes away). This is achieved through the use of simple Java interfaces and POJOs, known as <em>services</em>. (Note that they don't have any relation to WS-DeathStar or any other XML heavy infrastructure; they're just Plain Old Java Objects.)</p>
+<p>Whereas typical factories will be implemented using some form of class name acquired via a properties file and a subsequent <code>Class.forName()</code>, OSGi maintains a 'service registry' &ndash; in essence, a map containing a list of class names and services. So, instead of using <code>class.forName("com.example.JDBCDriver")</code> to acquire a JDBC driver, an OSGi system could use <code>context.getService(getServiceReference("java.sql.Driver"))</code> instead. This frees up the client code from having to know about any specific client implementation; instead, it can bind to whatever driver(s) are available at runtime. Migrating to a different database server would be a case of stopping one module and starting a new module; the client wouldn't even need to be restarted, nor would any configuration need to be changed.</p>
+<p>The reason this works is that the client only needs to know the API to the service it is requesting. This is almost always an interface, although the OSGi specification permits any class to be used. In the above case, the interface name is <code>java.sql.Driver</code>; the instance of the interface that's returned is the database implementation (whose class isn't known about, or indeed coded anywhere). Furthermore, if the service isn't available (there isn't a database, or the database has been temporarily stopped), then this method returns <code>null</code> to indicate that no such service is available.</p>
+<p>In order to be fully dynamic, the return result shouldn't be cached. In other words, each time the service is required, the <code>getService</code> needs to be re-invoked. The framework performs caching under the covers, so this isn't too much of a performance concern. But importantly, it allows the database service to be replaced on the fly with a new service, without changing the code &ndash; at the next invocation, the client will transparently bind to the new service.</p>
+<h2>Putting it into action</h2>
+<p>In order to demonstrate this, we're going to create an OSGi service that's useful for shortening URLs. The idea of these (largely interchangable) services is to take a long URL, like <a href="http://www.infoq.com/articles/modular-java-what-is-it">http://www.infoq.com/articles/modular-java-what-is-it</a>, and convert that into a shorter URL, like <a href="http://tr.im/EyH1">http://tr.im/EyH1</a>. As well as being used extensively on sites like Twitter, it's also possible to use these to replicate otherwise long URLs into something that can be written down on the back of a post-it note. Even magazines like New Scientist and Macworld are using them for printed media links.</p>
+<p>In order to implement the service, we'll need:</p>
 <ul>
-<li><b>Bundle-ManifestVersion</b>: must be 2 for OSGi R4 bundles (otherwise defaults to 1 for OSGi R3 bundles)</li>
-<li><b>Bundle-SymbolicName</b>: textual identifier of the bundle, often in reverse domain name format such as <code>com.infoq</code> and frequently corresponds to the packages contained therein</li>
-<li><b>Bundle-Version</b>: a version of the form <i>major.minor.micro.qualifier</i> where the first three elements are numeric (defaulting to 0) and <i>qualifier</i> is textual (defaulting to the empty string)</li>
+<li>An interface to a shortening service</li>
+<li>A bundle that, upon starting, will register a shortening implementation</li>
+<li>A demonstration client</li>
 </ul>
-<h2>Creating a bundle</h2>
-<p>The simplest bundle contains purely a manifest file as follows:</p>
+<p>Although there's nothing preventing these all being in the same bundle, we'll put them separate bundles. (Even when they are in the same bundle, it's best practice to allow the bundles to communicate via services as if they were in separate bundles; this makes it easier for them to integrate with other providers.)</p>
+<p>It's important that the interface to the shortening service is in a separate bundle from any implementations (or clients). The interface represents the 'shared code' between client and server, and as such, gets loaded by every bundle. Since this effectively pins each bundle to the (specific version of the) interface for the collective lifetime of all the services, by placing it in a separate bundle (which will remain running throughout the lifetime of the OSGi VM), we can allow our clients to come and go. If we were to put the interface in the same bundle as one of the service implementations, we wouldn't be able to reconnect clients if that service came and went.</p>
+<p>The manifest and implementation for the shorten interface isn't that interesting:</p>
 <blockquote><pre>
 Bundle-ManifestVersion: 2
-Bundle-SymbolicName: <a href="com.infoq.minimal/target/com.infoq.minimal-1.0.0.jar">com.infoq.minimal</a>
+Bundle-Name: Shorten
+Bundle-SymbolicName: com.infoq.shorten
 Bundle-Version: 1.0.0
-</pre></blockquote>
-<p>That wouldn't be tremendously exciting to create, however, so let's create one with an <em>activator</em>. This is an OSGi-specific piece of code which is invoked when the bundle is started, like a per-bundle main method.</p>
-<blockquote><pre>
-package com.infoq;
-import org.osgi.framework.*;
-public class ExampleActivator implements BundleActivator {
-  public void start(BundleContext context) {
-    System.out.println("Started");
-  }
-  public void stop(BundleContext context) {
-    System.out.println("Stopped");
-  }
-}
-</pre></blockquote>
-<p>In order for OSGi to know which class is the activator, we need to add two extra items to the manifest:</p>
-<blockquote><pre>
-Bundle-Activator: com.infoq.ExampleActivator
-Import-Package: org.osgi.framework
-</pre></blockquote>
-<p><code>Bundle-Activator</code> declares the class to instantiate and invoke the <code>start()</code> method when the bundle is started; similarly, the <code>stop()</code> method is called when the bundle is stopped.</p>
-<p>What about the <code>Import-Package</code>? Each bundle needs to define its dependencies in the manifest, in order to determine at runtime whether all the required code is available. In this case, the <code>ExampleActivator</code> depends on <code>BundleContext</code> from the <code>org.osgi.framework</code> package; if we don't declare that dependency in the manifest, we'll get a <code>NoClassDefFoundError</code> at runtime.</p>
-<h2>Downloading an OSGi engine</h2>
-<p>To compile and test our bundle, we'll need an OSGi engine. There are several open-source engines available for OSGi R4.2, listed below. It is also possible to download the <a href="http://www.osgi.org/Download/Release4V42">Reference API</a> to compile against (which guards against using any platform-specific features); however, you still need an OSGi engine to run it. Here are the options:</p>
+Export-Package: com.infoq.shorten
+--- 
+package com.infoq.shorten;
 
-<table>
-<tr><th colspan="2"><u>Equinox</u></th></tr>
-<tr><th>License</th><td><a href="http://www.eclipse.org/org/documents/epl-v10.php">Eclipse Public License</a></td></tr>
-<tr><th>Documentation</th><td><a href="http://www.eclipse.org/equinox/"> http://www.eclipse.org/equinox/</a></td></tr>
-<tr><th>Download</th><td><a href="http://download.eclipse.org/equinox/drops/R-3.5-200906111540/index.php">org.eclipse.osgi_3.5.0.v20090520.jar</a></td></tr>
-<tr><th>Notes</th><td><p>The <code>org.eclipse.osgi</code> bundle contains the framework, the runtime and a shell as an all-in-one. This is the only 'single JAR' solution (and therefore in some ways the easiest to get started with). It's also the longest named file; tab completion (or renaming to <code>equinox.jar</code>) will make that problem go away.</p><p>To get a console, supply <code>java -jar org.eclipse.osgi_3.5.0.v20090520.jar -console</code> on the command line.</td></tr>
-<tr><th>Framework</th><td><code>org.eclipse.osgi_3.5.0.v20090520.jar</td></tr>
-<tr><th colspan="2"><u>Felix</u></th></tr>
-<tr><th>License</th><td><a href="http://www.apache.org/licenses/LICENSE-2.0">Apache License</a></td></tr>
-<tr><th>Documentation</th><td><a href="http://felix.apache.org/">http://felix.apache.org/</a></td></tr>
-<tr><th>Download</th><td><a href="http://felix.apache.org/site/downloads.cgi">Felix Framework Distribution 2.0.0</a></td></tr>
-<tr><th>Notes</th><td>Seen as the most strictly compliant of the OSGi engines, it's also used in GlassFish and many other open-source products. You need to run <code>java -jar bin/felix.jar</code> instead of <code>java -jar felix.jar</code> since it looks for a path <code>bundles</code> to auto start from the current directory.</td></tr>
-<tr><th>Framework</th><td><code>bin/felix.jar</code></td></tr>
-<tr><th colspan="2"><u>Knopflerfish</u></th></tr>
-<tr><th>License</th><td><a href="http://www.knopflerfish.org/license.html">Knopflerfish License (BSD-esque)</a></td></tr>
-<tr><th>Documentation</th><td><a href="http://www.knopflerfish.org/">http://www.knopflerfish.org/</a></td></tr>
-<tr><th>Download</th><td><a href="http://www.knopflerfish.org/releases/2.3.3/knopflerfish_fullbin_osgi_2.3.3.jar"> knopflerfish_fullbin_osgi_2.3.3.jar</a></td></tr>
-<tr><th>Notes</th><td>This JAR is a self-extracting zip file; you have to run with <code>java -jar</code> initially to unpack. Don't download the '<code>bin_osgi</code>' alternative as this fails to start.</td>
-<tr><th>Framework</th><td><code>knopflerfish.org/osgi/framework.jar</code></td></tr>
-</table>
-<p>Whilst there are also smaller OSGi R3 runtimes available (like <a href="http://concierge.sourceforge.net/">Concierge</a>) that target embedded devices, this series will focus on OSGi R4.
-</p>
-<h2>Compiling and running a bundle</h2>
-<p>Having got your <i><code>framework.jar</code></i>, compiling the example above is a case of adding the OSGi framework to the classpath, and then packaging it up into a JAR:</p>
-<blockquote><p><code>javac -cp <i>framework.jar</i> com/infoq/*/*.java</code></p>
-<p><code>jar cfm example.jar MANIFEST.MF com</code></p></blockquote>
-<p>Each of the engines has some kind of shell with similar (but not identical) commands. For the purposes of this exercise, we'll just look at how to get the engine up and running, and install and start/stop the bundle.</p>
-<p>Once the engine is up and running, you can install the bundle (specified as a <code>file://</code> URL), and then using the returned numeric bundle id, start and stop it.</p>
-<table border="1" cellspacing="0" cellpadding="3">
-<thead>
-<tr><th><b>&nbsp;</b></th><th><b>Equinox</b></th><th><b>Felix</b></th><th><b>Knopflerfish</b></th></tr>
-</thead>
-<tbody>
-<tr>
-<td><b>Launch</b></td>
-<td><code>java -jar org.eclipse.osgi_*.jar -console</code></td>
-<td><code>java -jar bin/felix.jar</code></td>
-<td><code>java -jar framework.jar -xargs minimal.xargs</code></td>
-</tr>
-<tr>
-<td><b>Help</b></td>
-<td colspan="3"><code>help</code></td>
-</tr>
-<tr>
-<tr>
-<td><b>List</b></td>
-<td><code>ss</code></td>
-<td><code>ps</code></td>
-<td><code>bundles</code></td>
-</tr>
-<tr>
-<td><b>Install</b></td>
-<td colspan="3"><code>install <i>file:///path/to/example.jar</i></code></td>
-</tr>
-<tr>
-<td><b>Start</b></td>
-<td colspan="3"><code>start <i>id</i></code></td>
-</tr>
-<td><b>Update</b></td>
-<td colspan="3"><code>update <i>id</i></code></td>
-</tr>
-<tr>
-<td><b>Stop</b></td>
-<td colspan="3"><code>stop <i>id</i></code></td>
-</tr>
-<tr>
-<td><b>Uninstall</b></td>
-<td colspan="3"><code>uninstall <i>id</i></code></td>
-</tr>
-<tr>
-<td><b>Shutdown</b></td>
-<td><code>exit</code></td>
-<td colspan="2"><code>shutdown</code></td>
-</tr>
-</tbody>
-</table>
-<blockquote><p>Although all shells work in roughly the same way, the subtle differences between commands can be slightly confusing. A couple of harmonised console projects (<a href="http://wiki.ops4j.org/display/ops4j/Pax+Shell">Pax Shell</a>, <a href="http://www.paremus.com/devcon2009download/">Posh</a>) and launchers (<a href="http://paxrunner.ops4j.org/space/Pax+Runner">Pax Runner</a>) are available; OSGi <a href="https://www.osgi.org/bugzilla/buglist.cgi?content=132">RFC 132</a> is an ongoing proposal to try and standardise the command shells. <a href="http://felix.apache.org/site/apache-felix-karaf.html">Apache Karaf</a>, which aims to be a distribution that can run on top of Equinox or Felix and provides a harmonised shell as well as other features. Whilst using these for real deployments might be advisable, this series will focus on the vanilla OSGi framework implementations.</p></blockquote>
-<p>If you launch your OSGi framework, you should be able to install the <code><a href="com.infoq.minimal-1.0.0.jar">com.infoq.minimal-1.0.0.jar</a></code> from above (you can also install this straight from the site using the link's address and the <code>install</code> command). Each time you <code>install</code> the bundle, it will print out the numeric ID of that bundle.</p>
-<p>Depending on what other bundles are in the system, it's impossible to know what bundle identifier you'll end up with when installing; but you should be able to list the installed bundles using the appropriate command to find out.</p>
-<h2>Dependencies</h2>
-<p>So far, we've just got a single bundle. One of the benefits of modularity is that we can decompose our system into a number of smaller modules, and in doing so, reduce the application's complexity. To some extent, this is already done with Java's packages &ndash; for example, a <code>common</code> package with a <code>client</code> and <code>server</code> packages is often used in networked applications. The unstated implication is that the <code>client</code> and <code>server</code> packages are independent, and both depend on the <code>common</code> package; but as with <a href="http://www.infoq.com/news/2009/03/jetty-eclipse">Jetty's recent example</a> (where <code>client</code> accidentally ended up depending on <code>server</code>) this isn't always easy to achieve. In fact, some of the successes that OSGi brings to a project is purely the enforced modularity constraints between modules.</p>
-<p>Another benefit to modularisation is to separate out the 'public' packages from the non-public ones. Java's compile-time system allows for hidden non-public classes (those visible within a specific package) but does not provide a greater degree of flexibility than that. However, in an OSGi module, you can choose which packages are <i>exported</i> with the implicit fact that non-exported packages are not visible to other modules.</p> 
-<p>Let's say we're going to develop a function to instantiate <a href="http://bitworking.org/projects/URI-Templates/">URI Templates</a> (as used in <a href="http://www.restlet.org/documentation/2.0/tutorial#part11">Restlet</a>). Since this is likely to be reusable, we want to put this in its own module and have clients who need to use it depend on us. (Normally, bundles aren't quite as fine-grained as this; but it demonstrates the principle.) The function will take a template, like <code>http://www.amazon.{tld}/dp/{isbn}/</code>, and with a <code>Map</code> containing <code>tld=com,isbn=1411609255</code>, we can generate the URL <code><a href="http://www.amazon.com/dp/1411609255/">http://www.amazon.com/dp/1411609255/</a></code> <i>(One of the reasons to do this is to allow us to change the template if Amazon's URL scheme changes, although <a href="http://www.w3.org/Provider/Style/URI">Cool URIs don't change</a>.)</i></p>
-<p>In order to provide an easy way to switch between different implementations, we'll provide an interface and a factory. This will also allow us to see how we can hide the implementation away from clients whilst still giving them the functionality. The code (across several source files) will look like:</p>
-<blockquote>
-<pre>
-package com.infoq.templater.api;
-import java.util.*;
-public interface ITemplater {
-  public String template(String uri, Map data);
-}
-// ---
-package com.infoq.templater.api;
-import com.infoq.templater.internal.*;
-public class TemplaterFactory {
-  public static ITemplater getTemplater() {
-    return new Templater();
-  }
-}
-// ---
-package com.infoq.templater.internal;
-import com.infoq.templater.api.*;
-import java.util.*;
-public class Templater implements ITemplater {
-  public String template(String uri, Map data) {
-    String[] elements = uri.split("\\{|\\}");
-    StringBuffer buf = new StringBuffer();
-    for(int i=0;i&lt;elements.length;i++)
-        buf.append(i%2 == 0 ? elements[i] : data.get(elements[i]));
-    return buf.toString();
-  }
+public interface IShorten {
+	public String shorten(String url) throws IOException;
 }
 </pre></blockquote>
-<p>The implementation is hidden away in the <code> com.infoq.templater.internal</code> package, whilst the public API is in the <code>com.infoq.templater.api</code> package. This will give us the flexibility to change the implementation to a more efficient mechanism later on, if needed. (The <code>internal</code> package name is somewhat conventional, but you can call it what you want.)</p>
-<p>To give other bundles access to the public API, we need to <i>export</i> it from the bundle. Our manifest will look like:</p>
+<p>All this does is set up a bundle (<code><a href="com.infoq.shorten/target/com.infoq.shorten-1.0.0.jar">com.infoq.shorten</a></code>) with a single interface (<code>com.infoq.shorten.IShorten</code>), which is then exported to clients. The argument will just take a URL and then return an abbreviated version of the same.</p>
+<p>The implementation is a little more interesting. The grand-daddy of them all is <a href="http://tinyurl.com">TinyURL.com</a>, although more recently, shorter names have started to crop up. (It's somewhat ironic that <a href="http://tinyurl.com">http://tinyurl.com</a> can actually be abbreviated to a smaller URL like <a href="http://ow.ly/AvnC">http://ow.ly/AvnC</a>). Various popular ones exist; <a href="http://ow.ly">ow.ly</a>, <a href="http://bit.ly">bit.ly</a>, <a href="http://tr.im">tr.im</a> etc. This isn't meant to be a comprehensive guide to (or endorsement of) any of them; the implementation could apply equally to other services as well. This article will use TinyURL and Tr.im, for no other reason than they have anonymous GET-based submissions which makes them easy to implement.</p>
+<p>The implementation of both clients are in fact remarkably similar; they both take a URL with a parameter (the thing that is being shortened) and then return the newly shortened text:</p>
 <blockquote><pre>
+package com.infoq.shorten.tinyurl;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.URL;
+import com.infoq.shorten.IShorten;
+
+public class TinyURL implements IShorten {
+	private static final String lookup = 
+		"http://tinyurl.com/api-create.php?url=";
+	public String shorten(String url) throws IOException {
+		String line = new BufferedReader(
+			new InputStreamReader(
+				new URL(lookup + url).openStream())).readLine();
+		if(line == null)
+			throw new IllegalArgumentException( 
+				"Could not shorten " + url);
+		return line;
+	}
+}
+</pre></blockquote>
+<p>The implementation for Tr.im is similar, except for using the URL <code>http://api.tr.im/v1/trim_simple?url=</code> as the lookup instead. The source for both are in the <a href="com.infoq.shorten.tinyurl/target/com.infoq.shorten.tinyurl-1.0.0.jar">com.infoq.shorten.tinyurl</a> and <a href="com.infoq.shorten.trim/target/com.infoq.shorten.trim-1.0.0.jar">com.infoq.shorten.trim</a> bundles.</p>
+<p>So, armed with an implementation of a shortening service, how do we enable others to access it? Well, we need to <em>register</em> this as a service to the OSGi framework. The method <code>registerService(<i>class</i>,<i>instance</i>,<i>properties</i>)</code> on the <code>BundleContext</code> class allows us to define a service for later use, and is typically called during the bundle's <code>start()</code> call. As covered <a href="http://www.infoq.com/articles/modular-java-static-modularity">last time</a>, this means we have to have a <code>BundleActivator</code> defined. As well as the implementation of the class, we have to remember to put the <code>Bundle-Activator</code> into the <code>MANIFEST.MF</code> in order to find the implementation. Here's what it will look like:</p>
+<blockquote><pre>
+Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
-Bundle-SymbolicName: com.infoq.templater
+Bundle-Name: TinyURL
+Bundle-SymbolicName: com.infoq.shorten.tinyurl
 Bundle-Version: 1.0.0
-<b>Export-Package: com.infoq.templater.api</b>
-</pre></blockquote>
-<h2>Creating a client bundle</h2>
-<p>We can now create a client that uses the templater. Using the example above, create an activator whose <code>start()</code> method looks like:</p>
-<blockquote><pre>
-package com.infoq.amazon;
-import org.osgi.framework.*;
-import com.infoq.templater.api.*;
-import java.util.*;
-public class Client implements BundleActivator {
-  public void start(BundleContext context) {
-    Map<String, String> data = new HashMap<String, String>();
-    data.put("tld", "co.uk"); // or "com" or "de" or ...
-    data.put("isbn", "1411609255"); // or "1586033115" or ...
-    System.out.println( "Starting\n" + 
-        TemplaterFactory.getTemplater().template(
-        "http://www.amazon.{tld}/dp/{isbn}/", data));
-  }
-  public void stop(BundleContext context) {
-  }
+Import-Package: com.infoq.shorten,org.osgi.framework
+Bundle-Activator: com.infoq.shorten.tinyurl.Activator
+---
+package com.infoq.shorten.tinyurl;
+import org.osgi.framework.BundleActivator;
+import org.osgi.framework.BundleContext;
+import com.infoq.shorten.IShorten;
+
+public class Activator implements BundleActivator {
+	public void start(BundleContext context) {
+		context.registerService(IShorten.class.getName(),
+			new TinyURL(),null);
+	}
+	public void stop(BundleContext context) {
+	}
 }
 </pre></blockquote>
-<p>We'll need to define in our manifest that we're explicitly importing the templater API, as otherwise our bundle won't compile. We can either specify the dependency using either <code>Import-Package</code> or <code>Require-Bundle</code>. The former allows us to import packages individually; the latter will implicitly import all exported packages from the bundle. (Multiple packages and bundles are comma separated.)</p>
+<p>Although the <code>registerService()</code> method takes a string as its first argument, and it would be equally valid to say <code>"com.infoq.shorten.IShorten"</code>, it's best practice to use <code><i>class</i>.class.getName()</code>, as if you refactor the package or change the class name, it will be caught by the compiler. If you just use a string, and perform a bad refactoring, then you won't know about the problem until runtime.</p>
+<p>The second argument for <code>registerService()</code> is the instance itself. The reason this is distinct from the first argument is so that you can have the same service instance export multiple service interfaces (useful if you have a versioned API in your requirements, as you can <a href="http://wiki.eclipse.org/Evolving_Java-based_APIs_3#.222.22_Convention">evolve your interfaces</a>). In addition, it's quite possible that a single bundle will export multiple services of the same type.</p>
+<p>The last argument is for the <em>service properties</em>. These allow you to annotate the service with extra metadata, such as indicating a preference for how important this service is with respect to others, or additional information which may be of interest to the caller (such as a description and a vendor).</p>
+<p>As soon as this bundle starts, the shortening service will be made available to clients. When the bundle stops, the framework will automatically un-register any services. We could un-register it earlier (using <code>context.unregisterService()</code>) if we wanted to (say, in response to an error code or a network interface not being available).</p>
+<h2>Using the service</h2>
+<p>Once the service is up and running, we can then use a client to access it. If you're running in Equinox, you can use the <code>services</code> command to list the installed services, and who they are registered by:</p>
 <blockquote><pre>
-Bundle-ManifestVersion: 2
-Bundle-SymbolicName: com.infoq.amazon
-Bundle-Version: 1.0.0
-Bundle-Activator: com.infoq.amazon.Client
-<b>Import-Package: org.osgi.framework</b>
-<b>Require-Bundle: com.infoq.templater</b>
+{com.infoq.shorten.IShorten}={service.id=27}
+  Registered by bundle: com.infoq.shorten.trim-1.0.0 [1]
+  No bundles using service.
+{com.infoq.shorten.IShorten}={service.id=28}
+  Registered by bundle: com.infoq.shorten.tinyurl-1.0.0 [2]
+  No bundles using service.
 </pre></blockquote>
-<p>Note that in the earlier example, we were already using the <code>Import-Package</code> to import <code>org.osgi.framework</code>. In this case, we are demonstrating the use of <code>Require-Bundle</code> which uses the <code>Bundle-SymbolicName</code>. We could have equally well added it in as <code>Import-Package: org.osgi.framework, com.infoq.templater.api</code> instead.</p>
-<p>Regardless of how we declare our dependency on the <code>templater</code> bundle, we only get access to the single exported package <code>com.infoq.templater</code>. Although the client can access the templater via <code>TemplaterFactory.getTemplater()</code>, we can't directly access the class from the <code>internal</code> package. This gives us the flexibility to change implementation in the future without breaking clients.</p>
-<h2>Testing the system</h2>
-<p>Any OSGi application is really just a set of bundles. In this case, we need to compile and JAR up the bundles (as previously),  start up an OSGi engine, and install the two bundles. Here's what it would look like in Equinox:</p>
+<p>The client will need to resolve the service, before invoking it with a URL. We need to get a <em>service reference</em>, which allows us to introspect properties of the service itself, and then use that to get the <em>service</em> that we're interested in. However, we're going to need to be able to do this repeatedly (and with different URLs) so we can integrate it into the Equinox or Felix shells. Here's what the implementation will do:</p>
 <blockquote><pre>
-java -jar org.eclipse.osgi_* -console
-osgi&gt; install <a href="com.infoq.templater-1.0.0.jar">file:///tmp/com.infoq.templater-1.0.0.jar</a>
+package com.infoq.shorten.command;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceReference;
+import com.infoq.shorten.IShorten;
+
+public class ShortenCommand {
+	protected BundleContext context;
+	public ShortenCommand(BundleContext context) {
+		this.context = context;
+	}
+	protected String shorten(String url) throws IllegalArgumentException, IOException {
+		ServiceReference ref =
+			context.getServiceReference(IShorten.class.getName());
+		if(ref == null)
+			return null;
+		IShorten shorten = (IShorten) context.getService(ref);
+		if(shorten == null)
+			return null;
+		return shorten.shorten(url);
+	}
+}
+</pre></blockquote>
+<p>When the <code>shorten</code> method is invoked, this piece of code will look up the service reference, and from that, get the service object. We can then cast it to an <code>IShorten</code> object and use it to interact with the service registered previously. Note that all of this is in the same VM; there's no remote calls, no mandatory exceptions, no arguments are being serialised; it's just one POJO talking to another POJO. In fact, the only difference between this and the initial <code>class.forName()</code> example is how we're obtaining the <code>shorten</code> POJO.</p>
+<p>In order to use this inside Equinox and Felix, we need to put in some boilerplate code. Suffice to say, that when we define our manifest, we can declare optional dependencies on both the Felix and Equinox command line interfaces, so that when we install into either, we'll be able to run. (A better solution might be to deploy these as separate bundles so that we can lose the optionality; but the activator will fail if the bundles aren't present, and so won't be startable.) The source for the Equinox and Felix specific command hookups are in the <a href="com.infoq.shorten.command/target/com.infoq.shorten.command-1.0.0.jar">com.infoq.shorten.command</a> bundle for the curious.</p>
+<p>The result is that if we install the command client bundle, we'll get a new command, <code>shorten</code>, which we can invoke from an OSGi shell. This is run if you run <code>java -jar equinox.jar -console -noExit</code> or <code>java -jar bin/felix.jar</code>. You'll need to perform an install of the bundles in order to work; thereafter, you'll be able to use the commands:</p>
+<blockquote><pre>
+java -jar org.eclipse.osgi_* -console -noExit
+osgi&gt; install <a href="com.infoq.shorten/target/com.infoq.shorten-1.0.0.jar">file:///tmp/com.infoq.shorten-1.0.0.jar</a>
 Bundle id is 1
-osgi&gt; install <a href="com.infoq.amazon-1.0.0.jar">file:///tmp/com.infoq.amazon-1.0.0.jar</a>
+osgi&gt; install <a href="com.infoq.shorten.command/target/com.infoq.shorten.command-1.0.0.jar">file:///tmp/com.infoq.shorten.command-1.0.0.jar</a>
 Bundle id is 2
-osgi&gt; start 2
-Starting
-http://www.amazon.co.uk/dp/1411609255
+osgi&gt; install <a href="com.infoq.shorten.tinyurl/target/com.infoq.shorten.tinyurl-1.0.0.jar">file:///tmp/com.infoq.shorten.tinyurl-1.0.0.jar</a>
+Bundle id is 3
+osgi&gt; install <a href="com.infoq.shorten.trim/target/com.infoq.shorten.trim-1.0.0.jar">file:///tmp/com.infoq.shorten.trim-1.0.0.jar</a>
+Bundle id is 4
+osgi&gt; start 1 2 3 4
+osgi&gt; shorten <a href="http://www.infoq.com">http://www.infoq.com</a>
+http://tinyurl.com/yr2jrn
+osgi&gt; stop 3
+osgi&gt; shorten <a href="http://www.infoq.com">http://www.infoq.com</a>
+http://tr.im/Eza8
 </pre></blockquote>
-<p>The Amazon client bundle has started; and when it did, it instantiated the URI template for us with the (admittedly hard-coded) values previously. It then prints out during the startup of the bundle itself to confirm that it worked. Clearly, a real system wouldn't be so inflexible; but the Templater service could be used in any other application (for example, generating links in a web-based application). We'll look at web applications in an OSGi context in the future.</p>
-<h2>Versioned dependencies</h2>
-<p>The final point for this instalment is to note that the dependencies that we have at the moment are unversioned; or rather, that we'll be able to use any version. Both bundles as a whole and packages individually can be versioned, and increases in the minor number are used to signify new features (but remaining backwardly compatible). The <code>org.osgi.framework</code> package, for example, was version 1.4.0 in OSGi R4.1 and 1.5.0 in OSGi R4.2. (This, incidentally, is a good reason to keep the bundle version and marketing version as separate concepts, something that the <a href="http://permalink.gmane.org/gmane.comp.lang.scala.internals/1706">Scala language has yet to learn</a>.)</p>
-<p>To declare a dependency on a specific version, we have to express that in the <code>Import-Package</code> or <code>Require-Bundle</code>. For example, we can specify <code>Require-Bundle: com.infoq.templater;bundle-version="1.0.0"</code> to signify that we want a minimum version of 1.0.0 in order to work. Similarly, we could do the same with <code>Import-Package: com.infoq.templater.api;version="1.0.0"</code> &ndash; but bear in mind that the version of the <i>package</i> is distinct from the version of the <i>bundle</i>. If you don't specify a version, it defaults to 0.0.0, so unless you have a corresponding <code>Export-Package: com.infoq.templater.api;version="1.0.0"</code> then this import won't be resolved.</p>
-<p>It's also possible to specify a version range. For example, the conventional meaning to OSGi version numbers is that an increment of the major number indicates a change in backward compatibility, so we might just want to restrict ourselves to the 1.x range. To do that, we can express a <code>(bundle-)version="[1.0,2.0)"</code> dependency constraint. In this case, the [ means 'inclusive' and ) means 'exclusive', or in other words 'from 1.0 up to but not including 2.0 onwards'. In fact, expressing a dependency constraint of "1.0" is the same as "[1.0,<span title="Infinity is big. You just won't believe how vastly, hugely, mind-bogglingly big it is. I mean, you may think it's a long way down the road to the chemist's, but that's just peanuts to infinity.">&infin;</a>)" &ndash; in other words, anything bigger than 1.0.</p>
-<p>Although it's outside of the scope of this article, it's possible to have multiple versions of a bundle in an OSGi system at once. This might be useful if you have an old client which depends on version 1.0 of your API, as well as having a new client which depends on version 2.0 of your API. As long as the dependencies for each bundle are consistent (in other words, you don't have a bundle which tries to import 1.0 and 2.0 at the same time, directly or indirectly) then the application will run fine. As an exercise for the reader, you can create a version 2.0 of the Templater API to use generics, and then have a client which only depends on version 1.x as well as one that uses version 2.x.</p>
-<h2>Summary</h2>
-<p>In this article, we've explored the open-source OSGi engines Equinox, Felix and Knopflerfish, and created a dependent pair of bundles. We've also touched upon versioned dependencies. At the moment, this modularity is static; we haven't explored any of the dynamic nature of OSGi. We'll be looking at that in the next instalment.</p>
-<p>Installable bundles (also containing source):</p>
+<p>Note that both the TinyURL and Tr.im services are available at run-time, but clearly only one service can be used at a time. It's possible to set up a <em>service ranking</em>, which is an integer between <code>Integer.MIN_VALUE</code> and <code>Integer.MAX_VALUE</code>, by putting a corresponding value in with the <code>Constants.SERVICE_RANKING</code> key when the service is first registered. Higher values indicate a higher ranking, and when services are queried, the highest-ranking service will be returned. In the absence of a service ranking (which defaults to zero), or in a tie-break with multiple services, the automatically assigned <code>Constants.SERVICE_PID</code> is used to arbitrarily order
+the services.</p>
+<p>The other thing to note is that when we'd stopped the other service, the client automatically failed over to the next service in the list. Each time the command is run, it obtains the (current) service to use for its shortening needs. If the service providers change between runs, then the command need not be concerned, only that there is one when it needs it. (If you stop all providers, the service lookup will return <code>null</code> which will result in an error being printed &ndash; good code should ensure that it defensively programs against the possibility of a <code>null</code> being returned for the service reference.</p>
+<h2>Service Tracker</h2>
+<p>Instead of having to look up services each time, it's possible to use a <a href="http://www.osgi.org/javadoc/r4/org/osgi/util/tracker/ServiceTracker.html"><code>ServiceTracker</code></a> to do the work instead. This skips out the intermediary step of obtaining a <code>ServiceReference</code>, but does require that you call <code>open</code> after construction, in order to begin tracking services.</p>
+<p>As with the <code>ServiceReference</code>, it's possible to call <code>getService()</code> to obtain the service instance. There's also <code>waitForService()</code>, which blocks if a service is unavailable for the specified timeout (or for ever, if the timeout is zero). We could re-implement the shortening command as follows:</p>
+<blockquote><pre>
+package com.infoq.shorten.command;
+
+import java.io.IOException;
+import org.osgi.framework.BundleContext;
+import org.osgi.util.tracker.ServiceTracker;
+import com.infoq.shorten.IShorten;
+
+public class ShortenCommand {
+	protected ServiceTracker tracker;
+	public ShortenCommand(BundleContext context) {
+		this.tracker = new ServiceTracker(context,
+			IShorten.class.getName(),null);
+		this.tracker.open();
+	}
+	protected String shorten(String url) throws IllegalArgumentException,
+			IOException {
+		try {
+			IShorten shorten = (IShorten)
+				tracker.waitForService(1000);
+			if (shorten == null)
+				return null;
+			return shorten.shorten(url);
+		} catch (InterruptedException e) {
+			return null;
+		}
+	}
+}
+</pre></blockquote>
+<p>A common problem with Service Tracker is forgetting to invoke <code>open()</code> once it's constructed. It will also be necessary to import <code>org.osgi.util.tracker</code> as a package inside the MANIFEST.MF in order to run.</p>
+<p>Using <code>ServiceTracker</code> in order to manage dependencies on services is generally seen as a good way to manage relationships. There are some subtle complexities in looking up a service which are exposed when not using a service, such as when a <code>ServiceReference</code> becomes unavailable but before it is resolved into a service. The rationale for having a <code>ServiceReference</code> are that it's possible for the same instance to be shared across bundles, and it can be used to (manually) filter out services based on some criteria. However, it's also possible to use filters in order to restrict the set of available services.</p>
+<h2>Service properties and filters</h2>
+<p>When a service is registered, it's possible to register service properties with it. Most of the time this can be <code>null</code>, but it's possible to supply both OSGi-specific and general properties about the URLs. For example, let's say that we want to rank the services in order of preference. We can register the <code>Constants.SERVICE_RANKING</code> as part of the initial registration process with some form of numeric preference value. We might also want to put in some metadata that the client may wish to know, such as where the home page of the service is, and a link to the terms and conditions for the site. To do this, we'll need to modify our activator:</p>
+<blockquote><pre>
+public class Activator implements BundleActivator {
+	public void start(BundleContext context) {
+		Hashtable properties = new Hashtable();
+		properties.put(Constants.SERVICE_RANKING, 10);
+		properties.put(Constants.SERVICE_VENDOR, "http://tr.im");
+		properties.put("home.page", "http://tr.im");
+		properties.put("FAQ", "http://tr.im/website/faqs");
+		context.registerService(IShorten.class.getName(),
+			new Trim(), properties);
+	}
+...
+}
+</pre></blockquote>
+<p>The service ranking is automatically managed by the <code>ServiceTracker</code> and others, but it's possible to filter out those with certain attributes as well. The <code>Filter</code> is compiled from an LDAP style filter, which uses a <a href="http://en.wikipedia.org/wiki/Prefix_notation">prefix notation</a> to perform multiple filters. Although it's most common that you want to supply the name of the class (<code>Constants.OBJECTCLASS</code>), you can also perform tests on values (and even constrain ranges of continuous variables). Filters are created via the <code>BundleContext</code>; if we wanted to track services which implemented the <code>IShorten</code> interface as well as having a FAQ defined, we could do:</p>
+<blockquote><pre>
+...
+public class ShortenCommand
+	public ShortenCommand(BundleContext context) {
+		Filter filter = context.createFilter("(&amp;" +
+			"(objectClass=com.infoq.shorten.IShorten)" +
+			"(FAQ=*))");
+		this.tracker = new ServiceTracker(context,filter,null);
+		this.tracker.open();
+	}
+	...
+}
+</pre></blockquote>
+<p>Standard properties, which can be filtered on or set when defining a service, include:</p>
 <ul>
-<li><a href="com.infoq.minimal/target/com.infoq.minimal-1.0.0.jar">com.infoq.minimal-1.0.0.jar</a>
-<li><a href="com.infoq.templater/target/com.infoq.templater-1.0.0.jar">com.infoq.templater-1.0.0.jar</a>
-<li><a href="com.infoq.amazon/target/com.infoq.amazon-1.0.0.jar">com.infoq.amazon-1.0.0.jar</a>
+<li><code>service.ranking</code> (Constants.SERVICE_RANKING) - an integer that can be used to prioritise services over others</li>
+<li><code>service.id</code> (Constants.SERVICE_ID) - an integer, automatically set by the framework when the service is registered</li>
+<li><code>service.vendor</code> (Constants.SERVICE_VENDOR) - a string which can be set to indicate who the service comes from</li>
+<li><code>service.pid</code> (Constants.SERVICE_PID) - a string, or array of strings, representing the service's persistent identifier</li>
+<li><code>service.description</code> (Constants.SERVICE_DESCRIPTION) - the description of the service</li>
+<li><code>objectClass</code> (Constants.OBJECTCLASS) - the list of interfaces that this service is registered under</li>
+</ul>
+<p>The filter syntax is defined in Section 3.2.7 "Filter syntax" of the <a href="http://www.osgi.org/Download/Release4V42">OSGi core specification</a>. Essentially, it allows operations like equality (=), approximation (~=), greater-or-equal, lesser-or-equal as well as substring comparisons. Brackets group the filters, and can be combined with &amp;, | or ! modifiers for and, or and not, respectively.  Whilst the attribute names are not case sensitive, the values may be (unless compared with ~=). The * character is used to indicate wildcards, and can be used to support substring matching as in <code>com.infoq.*.*</code>.</p>
+<h2>Summary</h2>
+<p>In this article, we've explored how we can use service as a way of communicating between bundles instead of direct class references. Services allow the module system to be dynamic, such that it reacts to services which come and go at runtime. We've also touched upon service ranking, properties and filters, and used the standard service tracker to make it easy to access and track services that come and go. We'll be looking at how to make wiring of services easier with declarative services in the next installment.</p>
+<p>Installable bundles:</p>
+<ul>
+<li><a href="com.infoq.shorten/target/com.infoq.shorten-1.0.0.jar">com.infoq.shorten-1.0.0.jar</a></li>
+<li><a href="com.infoq.shorten.command/target/com.infoq.shorten.command-1.0.0.jar">com.infoq.shorten.command-1.0.0.jar</a></li>
+<li><a href="com.infoq.shorten.trim/target/com.infoq.shorten.trim-1.0.0.jar">com.infoq.shorten.trim-1.0.0.jar</a></li>
+<li><a href="com.infoq.shorten.tinyurl/target/com.infoq.shorten.tinyurl-1.0.0.jar">com.infoq.shorten.tinyurl-1.0.0.jar</a></li>
 </ul>

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>com.infoq</groupId>
+		<artifactId>modularity-parent</artifactId>
+		<version>1.0.0</version>
+		<relativePath>../pom.xml</relativePath>
+	</parent>
+	<groupId>com.infoq</groupId>
+	<artifactId>com.infoq.shorten.command</artifactId>
+	<version>1.0.0</version>
+	<name>com.infoq.shorten.command</name>
+	<description>Demonstration of how to achieve static modularity (client)</description>
+	<packaging>bundle</packaging>
+	<dependencies>
+		<dependency>
+			<groupId>org.osgi</groupId>
+			<artifactId>org.osgi.core</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>com.infoq</groupId>
+			<artifactId>com.infoq.shorten</artifactId>
+			<version>1.0.0</version>
+			<type>bundle</type>
+		</dependency>
+		<dependency>
+			<!-- For Felix 2.x support -->
+			<groupId>org.apache.felix</groupId>
+			<artifactId>org.apache.felix.shell</artifactId>
+			<version>1.4.2</version>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<!-- For Felix Gogo 3.0 support -->
+			<groupId>org.apache.felix</groupId>
+			<artifactId>org.apache.felix.gogo.runtime</artifactId>
+			<version>0.6.1</version>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<!-- For Equinox 3.x support -->
+			<groupId>org.eclipse.osgi</groupId>
+			<artifactId>org.eclipse.osgi</artifactId>
+			<version>3.6.0.v20100517</version>
+			<optional>true</optional>
+		</dependency>
+	</dependencies>
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.felix</groupId>
+				<artifactId>maven-bundle-plugin</artifactId>
+				<version>2.1.0</version>
+				<extensions>true</extensions>
+				<configuration>
+					<instructions>
+                                                <Bundle-SymbolicName>${project.artifactId}</Bundle-SymbolicName>
+						<Bundle-Activator>${project.artifactId}.Activator</Bundle-Activator>
+						<Import-Package>
+							org.apache.felix.shell;resolution:=optional,
+							org.apache.felix.service.command;resolution:=optional,
+							org.eclipse.osgi.framework.console;resolution:=optional,
+							*
+						</Import-Package>
+					</instructions>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+</project>

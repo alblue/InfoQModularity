@@ -20,9 +20,10 @@
 	</properties>
 	<packaging>pom</packaging>
 	<modules>
-		<module>com.infoq.minimal</module>
-		<module>com.infoq.templater</module>
-		<module>com.infoq.amazon</module>
+		<module>com.infoq.shorten</module>
+		<module>com.infoq.shorten.command</module>
+		<module>com.infoq.shorten.tinyurl</module>
+		<module>com.infoq.shorten.trim</module>
 	</modules>
 	
 	<dependencyManagement>
